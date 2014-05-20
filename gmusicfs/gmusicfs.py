@@ -15,6 +15,7 @@ import shutil
 import tempfile
 import threading
 import logging
+import pprint
 
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn, fuse_get_context
 from gmusicapi import Mobileclient as GoogleMusicAPI
@@ -25,6 +26,7 @@ import fifo
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger('gmusicfs')
 deviceId=None
+pp = pprint.PrettyPrinter(indent=4) # DEBUG
 
 # Size of the ID3v1 trailer appended to the mp3 file (at read time)
 # Add the size to the reported size of the mp3 file so read function receive correct params.
@@ -133,6 +135,8 @@ class MusicLibrary(object):
 
         self.__artists = {} # 'artist name' -> {'album name' : Album(), ...}
         self.__albums = [] # [Album(), ...]
+        self.__tracks = {}
+        self.__playlists = {}
         if scan:
             self.rescan()
         self.true_file_size = true_file_size
@@ -140,6 +144,8 @@ class MusicLibrary(object):
     def rescan(self):
         self.__artists = {} # 'artist name' -> {'album name' : Album(), ...}
         self.__albums = [] # [Album(), ...]
+        self.__tracks = {}
+        self.__playlists = {}
         self.__aggregate_albums()
 
     def __login_and_setup(self, username=None, password=None):
@@ -182,6 +188,7 @@ class MusicLibrary(object):
         log.info('Gathering track information...')
         tracks = self.api.get_all_songs()
         for track in tracks:
+            log.debug('track = %s' % pp.pformat(track))
             # Prefer the album artist over the track artist if there is one:
             artist = formatNames(track['albumArtist'].lower())
             if artist.strip() == '':
@@ -203,12 +210,32 @@ class MusicLibrary(object):
                     self.__artists[artist] = {album.normtitle: album}
                     artist_albums = self.__artists[artist]
             album.add_track(track)
+            if 'id' in track:
+                self.__tracks[track['id']] = track
         log.debug('%d tracks loaded.' % len(tracks))
         log.debug('%d artists loaded.' % len(self.__artists))
         log.debug('%d albums loaded.' % len(self.__albums))
+        playlists = self.api.get_all_user_playlist_contents()
+        for playlist in playlists:
+            name = formatNames(playlist['name'].lower())
+            log.debug('Playlist %s' % name)
+            self.__playlists[name] = []
+            entries = playlist['tracks']
+            for entry in entries:
+                log.debug('Playlist entry = %s' % pp.pformat(entry))
+                if 'track' in entry:
+                    track = entry['track']
+                    track['id'] = entry['trackId']
+                else:
+                    track = self.__tracks[entry['trackId']]
+                self.__playlists[name].append(track)
+        log.debug('%d playlists loaded.' % len(self.__playlists))
 
     def get_artists(self):
         return self.__artists
+
+    def get_playlists(self):
+        return self.__playlists
 
     def get_albums(self):
         return self.__albums
@@ -232,6 +259,9 @@ class GMusicFS(LoggingMixIn, Operations):
             '^/artists/(?P<artist>[^/]+)/(?P<year>[0-9]{4}) - (?P<album>[^/]+)/(?P<track>[^/]+\.mp3)$')
         self.artist_album_image = re.compile(
             '^/artists/(?P<artist>[^/]+)/(?P<year>[0-9]{4}) - (?P<album>[^/]+)/(?P<image>[^/]+\.jpg)$')
+        self.playlist_dir = re.compile('^/playlists/(?P<playlist>[^/]+)$')
+        self.playlist_track = re.compile(
+            '^/playlists/(?P<playlist>[^/]+)/(?P<tracknum>[0-9]{3}) - (?P<track>[^/]+\.mp3)$')
 
         self.__open_files = {} # path -> urllib2_obj
 
@@ -243,12 +273,27 @@ class GMusicFS(LoggingMixIn, Operations):
     def cleanup(self):
         self.library.cleanup()
 
+    def track_to_stat(self, track):
+        st = {
+            'st_mode' : (S_IFREG | 0444),
+            'st_size' : int(track['estimatedSize']),
+            'st_ctime' : 0,
+            'st_mtime' : 0,
+            'st_atime' : 0 }
+        if 'creationTimestamp' in track:
+            st['st_ctime'] = st['st_mtime'] = int(track['creationTimestamp']) / 1000000
+        if 'recentTimestamp' in track:
+            st['st_atime'] = int(track['recentTimestamp']) / 1000000
+        return st
+
     def getattr(self, path, fh=None):
         'Get info about a file/dir'
         artist_dir_m = self.artist_dir.match(path)
         artist_album_dir_m = self.artist_album_dir.match(path)
         artist_album_track_m = self.artist_album_track.match(path)
         artist_album_image_m = self.artist_album_image.match(path)
+        playlist_dir_m = self.playlist_dir.match(path)
+        playlist_track_m = self.playlist_track.match(path)
 
         # Default to a directory
         st = {
@@ -261,6 +306,8 @@ class GMusicFS(LoggingMixIn, Operations):
             pass
         elif path == '/artists':
             pass
+        elif path == '/playlists':
+            pass
         elif artist_dir_m:
             pass
         elif artist_album_dir_m:
@@ -270,12 +317,7 @@ class GMusicFS(LoggingMixIn, Operations):
             album = self.library.get_artists()[
                 parts['artist']][parts['album']]
             track = album.get_track(parts['track'])
-            st = {
-                'st_mode' : (S_IFREG | 0444),
-                'st_size' : int(track['estimatedSize']),
-                'st_ctime' : int(track['creationTimestamp']) / 1000000,
-                'st_mtime' : int(track['creationTimestamp']) / 1000000,
-                'st_atime' : int(track['recentTimestamp']) / 1000000}
+            st = self.track_to_stat(track)
         elif artist_album_image_m:
             parts = artist_album_image_m.groupdict()
             album = self.library.get_artists()[
@@ -286,6 +328,13 @@ class GMusicFS(LoggingMixIn, Operations):
             st = {
                 'st_mode' : (S_IFREG | 0444),
                 'st_size' : cover_size }
+        elif playlist_dir_m:
+            pass
+        elif playlist_track_m:
+            parts = playlist_track_m.groupdict()
+            playlist = self.library.get_playlists()[parts['playlist']]
+            track = playlist[int(parts['tracknum'], 10) - 1]
+            st = self.track_to_stat(track)
         else:
             raise FuseOSError(ENOENT)
 
@@ -294,6 +343,7 @@ class GMusicFS(LoggingMixIn, Operations):
     def open(self, path, fh):
         artist_album_track_m = self.artist_album_track.match(path)
         artist_album_image_m = self.artist_album_image.match(path)
+        playlist_track_m = self.playlist_track.match(path)
 
         if artist_album_track_m:
             parts = artist_album_track_m.groupdict()
@@ -306,6 +356,11 @@ class GMusicFS(LoggingMixIn, Operations):
             album = self.library.get_artists()[
                 parts['artist']][parts['album']]
             url = album.get_cover_url()
+        elif playlist_track_m:
+            parts = playlist_track_m.groupdict()
+            playlist = self.library.get_playlists()[parts['playlist']]
+            track = playlist[int(parts['tracknum'], 10) - 1]
+            url = self.library.api.get_stream_url(track['id'], deviceId)
         else:
             RuntimeError('unexpected opening of path: %r' % path)
 
@@ -351,11 +406,14 @@ class GMusicFS(LoggingMixIn, Operations):
         artist_album_dir_m = self.artist_album_dir.match(path)
         artist_album_track_m = self.artist_album_track.match(path)
         artist_album_image_m = self.artist_album_image.match(path)
+        playlist_dir_m = self.playlist_dir.match(path)
 
         if path == '/':
-            return ['.', '..', 'artists']
+            return ['.', '..', 'artists', 'playlists']
         elif path == '/artists':
             return  ['.','..'] + self.library.get_artists().keys()
+        elif path == '/playlists':
+            return  ['.','..'] + self.library.get_playlists().keys()
         elif artist_dir_m:
             # Artist directory, lists albums.
             albums = self.library.get_artist_albums(
@@ -376,6 +434,14 @@ class GMusicFS(LoggingMixIn, Operations):
             cover = album.get_cover_url()
             if cover:
                 files.append('cover.jpg')
+            return files
+        elif playlist_dir_m:
+            tracknum = 1
+            playlist = self.library.get_playlists()[playlist_dir_m.groupdict()['playlist']]
+            files = ['.', '..']
+            for track in playlist:
+                files.append('%03d - %s - %s - %s.mp3' % (tracknum, formatNames(track['artist'].lower()), formatNames(track['album'].lower()), formatNames(track['title'].lower())))
+                tracknum += 1
             return files
 
 
