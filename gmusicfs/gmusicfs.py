@@ -4,8 +4,11 @@ import os
 import re
 import sys
 import struct
-import urllib2
-import ConfigParser
+try:
+    import urllib.request as req, urllib.error, urllib.parse
+except ImportError:
+    import urllib2 as req
+import configparser
 from errno import ENOENT
 from stat import S_IFDIR, S_IFREG
 import time
@@ -32,6 +35,7 @@ pp = pprint.PrettyPrinter(indent=4) # DEBUG
 # Add the size to the reported size of the mp3 file so read function receive correct params.
 # The read function will read size bytes - 128 since we have to generate this 128 bytes.
 ID3V1_TRAILER_SIZE = 128
+
 
 def formatNames(string_from):
     return re.sub('/', '-', string_from)
@@ -61,10 +65,10 @@ class Album(object):
         # Retrieve and remember the filesize of each track:
         if get_size and self.library.true_file_size:
             for t in self.__tracks:
-                if not t.has_key('bytes'):
-                    r = urllib2.Request(self.get_track_stream(t)[0])
+                if 'bytes' not in t:
+                    r = req.Request(self.get_track_stream(t)[0])
                     r.get_method = lambda: 'HEAD'
-                    u = urllib2.urlopen(r)
+                    u = req.urlopen(r)
                     t['bytes'] = int(u.headers['Content-Length']) + ID3V1_TRAILER_SIZE
         return self.__tracks
 
@@ -95,9 +99,9 @@ class Album(object):
     def get_cover_size(self):
         'Get the album cover size'
         if self.library.true_file_size:
-            r = urllib2.Request(self.get_cover_url())
+            r = urllib.request.Request(self.get_cover_url())
             r.get_method = lambda: 'HEAD'
-            u = urllib2.urlopen(r)
+            u = urllib.request.urlopen(r)
             return int(u.headers['Content-Length'])
         return None
 
@@ -111,7 +115,7 @@ class Album(object):
             if y:
                 count = years.get(y, 0)
                 years[y] = count + 1
-        top_years = sorted(years.items(),
+        top_years = sorted(list(years.items()),
                            key=operator.itemgetter(1), reverse=True)
         try:
             top_year = top_years[0][0]
@@ -120,7 +124,7 @@ class Album(object):
         return top_year
 
     def __repr__(self):
-        return u'<Album \'{title}\'>'.format(title=self.normtitle)
+        return '<Album \'{title}\'>'.format(title=self.normtitle)
 
 class MusicLibrary(object):
     'Read information about your Google Music library'
@@ -162,7 +166,7 @@ class MusicLibrary(object):
                 raise NoCredentialException(
                     'Config file is not protected. Please run: '
                     'chmod 600 %s' % cred_path)
-            self.config = ConfigParser.ConfigParser()
+            self.config = configparser.ConfigParser()
             self.config.read(cred_path)
             username = self.config.get('credentials','username')
             password = self.config.get('credentials','password')
@@ -275,7 +279,7 @@ class GMusicFS(LoggingMixIn, Operations):
 
     def track_to_stat(self, track):
         st = {
-            'st_mode' : (S_IFREG | 0444),
+            'st_mode' : S_IFREG or 444,
             'st_size' : int(track['estimatedSize']),
             'st_ctime' : 0,
             'st_mtime' : 0,
@@ -297,7 +301,7 @@ class GMusicFS(LoggingMixIn, Operations):
 
         # Default to a directory
         st = {
-            'st_mode' : (S_IFDIR | 0755),
+            'st_mode' : S_IFDIR or 755,
             'st_nlink' : 2 }
         date = 0 # Make the date really old, so that cp -u works correctly.
         st['st_ctime'] = st['st_mtime'] = st['st_atime'] = date
@@ -326,7 +330,7 @@ class GMusicFS(LoggingMixIn, Operations):
             if cover_size is None:
                 cover_size = 10000000
             st = {
-                'st_mode' : (S_IFREG | 0444),
+                'st_mode' : S_IFREG or 444,
                 'st_size' : cover_size }
         elif playlist_dir_m:
             pass
@@ -364,7 +368,7 @@ class GMusicFS(LoggingMixIn, Operations):
         else:
             RuntimeError('unexpected opening of path: %r' % path)
 
-        u = self.__open_files[fh] = urllib2.urlopen(url)
+        u = self.__open_files[fh] = urllib.request.urlopen(url)
         u.bytes_read = 0
 
         return fh
@@ -411,16 +415,16 @@ class GMusicFS(LoggingMixIn, Operations):
         if path == '/':
             return ['.', '..', 'artists', 'playlists']
         elif path == '/artists':
-            return  ['.','..'] + self.library.get_artists().keys()
+            return  ['.','..'] + list(self.library.get_artists().keys())
         elif path == '/playlists':
-            return  ['.','..'] + self.library.get_playlists().keys()
+            return  ['.','..'] + list(self.library.get_playlists().keys())
         elif artist_dir_m:
             # Artist directory, lists albums.
             albums = self.library.get_artist_albums(
                 artist_dir_m.groupdict()['artist'])
             # Sort albums by year:
-            album_dirs = [u'{year:04d} - {name}'.format(
-                year=a.get_year(), name=formatNames(a.normtitle)) for a in albums.values()]
+            album_dirs = ['{year:04d} - {name}'.format(
+                year=a.get_year(), name=formatNames(a.normtitle)) for a in list(albums.values())]
             return ['.','..'] + album_dirs
         elif artist_album_dir_m:
             # Album directory, lists tracks.
@@ -457,7 +461,7 @@ def getDeviceId(verbose=False):
         raise NoCredentialException(
             'Config file is not protected. Please run: '
             'chmod 600 %s' % cred_path)
-    config = ConfigParser.ConfigParser()
+    config = configparser.ConfigParser()
     config.read(cred_path)
     username = config.get('credentials','username')
     password = config.get('credentials','password')
@@ -475,7 +479,7 @@ def getDeviceId(verbose=False):
         if not device['name']:
             device['name']='NoName'
         if device['id'][1]=='x':
-            print '%s : %s' % (device['name'], device['id'])
+            print(('%s : %s' % (device['name'], device['id'])))
 
 def main():
     log.setLevel(logging.WARNING)
