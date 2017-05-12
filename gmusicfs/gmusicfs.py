@@ -472,7 +472,11 @@ def getDeviceId(verbose=False):
 
     api = GoogleMusicWebAPI(debug_logging=verbose)
     log.info('Logging in...')
-    api.login(username, password)
+    logged_in = api.login(username, password)
+    if not logged_in:
+        # https://www.google.com/settings/security/lesssecureapps
+        raise Exception("Failed to login on Web API")
+
     log.info('Login successful.')
 
     for device in api.get_registered_devices():
